@@ -1,0 +1,11 @@
+{
+    "files.associations": {
+        "*.gr": "csharp",
+        "*.xe": "java",
+        "*.ir": "lua",
+        "*.co": "csharp",
+        "*.usm": "nasm",
+        "*.bo": "json",
+        "stdint.h": "c"
+    }
+}
