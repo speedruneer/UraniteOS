@@ -6,6 +6,8 @@
         "*.co": "csharp",
         "*.usm": "nasm",
         "*.bo": "json",
-        "stdint.h": "c"
-    }
+        "stdint.h": "c",
+        "stdio.h": "c"
+    },
+    "makefile.configureOnOpen": false
 }

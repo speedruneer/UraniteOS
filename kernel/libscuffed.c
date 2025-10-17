@@ -1,6 +1,13 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+#include <asm.h>
+
+#define VGA_ADDR ((uint16_t*)0xB8000)
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_COLOR 0x07  // light gray on black
 
 #define HEAP_START 0x100000  // example start of heap (1MB)
 #define HEAP_SIZE  0x100000  // 1MB heap size
@@ -23,6 +30,7 @@ void *memcpy(void *dest, const void *src, size_t n) {
     }
     return dest;
 }
+
 int memcmp(const void *a, const void *b, size_t n) {
     const unsigned char *pa = (const unsigned char*)a;
     const unsigned char *pb = (const unsigned char*)b;
@@ -33,31 +41,200 @@ int memcmp(const void *a, const void *b, size_t n) {
     return 0;
 }
 
-static uint8_t *heap = (uint8_t*)HEAP_START;
-static size_t used = 0;
+// malloc.c - simple first-fit allocator for IA32 within fixed heap region
+// Replace your bump-allocator section with this file's contents.
+// Expects HEAP_START and HEAP_SIZE macros to be defined (as in your snippet).
+
+#ifndef HEAP_START
+#error "HEAP_START must be defined"
+#endif
+#ifndef HEAP_SIZE
+#error "HEAP_SIZE must be defined"
+#endif
+
+// basic alignment for IA32·
+#define ALIGN4(x) (((x) + 3) & ~3U)
+
+typedef struct header {
+    uint32_t size;          // total size of this block including header (bytes)
+    struct header *next;    // pointer to next physical block or NULL
+    uint8_t free;           // 1 if free, 0 if allocated
+    uint8_t pad[3];         // padding to make header 12 bytes (multiple of 4)
+} header_t;
+
+#define HEADER_SIZE (sizeof(header_t))
+
+// heap region (provided by user)
+static uint8_t * const _heap_start = (uint8_t *) (uintptr_t) HEAP_START;
+static const uint32_t _heap_size = (uint32_t) HEAP_SIZE;
+static uint8_t _heap_inited = 0;
+static header_t *heap_head = NULL;
+
+// internal helpers
+
+static void heap_init(void) {
+    if (_heap_inited) return;
+    // place one big free block covering the whole region
+    heap_head = (header_t *)_heap_start;
+    heap_head->size = _heap_size;
+    heap_head->next = NULL;
+    heap_head->free = 1;
+    _heap_inited = 1;
+}
+
+// find a free block (first-fit)
+static header_t *find_free_block(uint32_t total_size, header_t **prev_out) {
+    header_t *cur = heap_head;
+    header_t *prev = NULL;
+    while (cur) {
+        if (cur->free && cur->size >= total_size) {
+            if (prev_out) *prev_out = prev;
+            return cur;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+    if (prev_out) *prev_out = prev;
+    return NULL;
+}
+
+// split block into allocated part (size = total_size) and remainder (if enough space)
+static void split_block(header_t *block, uint32_t total_size) {
+    // only split if remaining space is large enough for a header + 4 bytes payload
+    if (block->size >= total_size + HEADER_SIZE + 4) {
+        uint8_t *new_block_addr = (uint8_t *)block + total_size;
+        header_t *new_block = (header_t *) new_block_addr;
+        new_block->size = block->size - total_size;
+        new_block->next = block->next;
+        new_block->free = 1;
+        // shrink current block
+        block->size = total_size;
+        block->next = new_block;
+    }
+}
+
+// coalesce block with next if next is free
+static void try_coalesce_next(header_t *block) {
+    if (!block || !block->next) return;
+    if (block->next->free) {
+        block->size += block->next->size;
+        block->next = block->next->next;
+    }
+}
+
+// get pointer to payload (user pointer)
+static void *header_to_payload(header_t *h) {
+    return (void *)((uint8_t *)h + HEADER_SIZE);
+}
+
+// get header from payload pointer
+static header_t *payload_to_header(void *p) {
+    if (!p) return NULL;
+    return (header_t *)((uint8_t *)p - HEADER_SIZE);
+}
+
+// PUBLIC API
 
 void *malloc(size_t size) {
-    if (used + size > HEAP_SIZE)
-        return NULL; // out of memory
+    if (size == 0) return NULL;
+    heap_init();
 
-    void *ptr = heap + used;
-    used += size;
-    return ptr;
+    uint32_t req_payload = (uint32_t) ALIGN4(size);
+    uint32_t total_size = req_payload + (uint32_t)HEADER_SIZE;
+
+    header_t *prev = NULL;
+    header_t *blk = find_free_block(total_size, &prev);
+    if (!blk) {
+        // out of memory within fixed heap
+        return NULL;
+    }
+
+    // If perfect fit or small leftover, just use block
+    split_block(blk, total_size);
+    blk->free = 0;
+
+    return header_to_payload(blk);
 }
 
 void free(void *ptr) {
-    // bump allocators can't free, enjoy your leaks.
-    (void)ptr;
+    if (!ptr) return;
+    header_t *h = payload_to_header(ptr);
+
+    // basic sanity: ensure header lies within heap range
+    uint8_t *hb = (uint8_t *)h;
+    if (hb < _heap_start || hb >= _heap_start + _heap_size) {
+        // invalid pointer for this allocator; ignore quietly
+        return;
+    }
+
+    h->free = 1;
+
+    // coalesce with next if possible
+    try_coalesce_next(h);
+
+    // coalesce with previous by scanning from head (cheap but fine for small heaps)
+    header_t *cur = heap_head;
+    while (cur && cur->next && cur->next != h) cur = cur->next;
+    if (cur && cur->next == h) {
+        if (cur->free) {
+            cur->size += h->size;
+            cur->next = h->next;
+            h = cur; // now coalesced region; try also to coalesce with following one
+        }
+    }
+
+    // also try to coalesce with next of resulting block
+    try_coalesce_next(h);
 }
 
 void *realloc(void *ptr, size_t size) {
-    // just malloc new space and copy old data if you have memcpy
-    void *new_ptr = malloc(size);
-    if (!new_ptr) return NULL;
-    if (ptr) {
-        // TODO: copy old data if you track block sizes
+    if (!ptr) return malloc(size);
+    if (size == 0) { free(ptr); return NULL; }
+
+    header_t *h = payload_to_header(ptr);
+    uint32_t req_payload = (uint32_t) ALIGN4(size);
+    uint32_t req_total = req_payload + (uint32_t)HEADER_SIZE;
+
+    // if current block big enough, maybe split
+    if (h->size >= req_total) {
+        split_block(h, req_total);
+        return ptr;
     }
-    return new_ptr;
+
+    // try to expand into next free block
+    if (h->next && h->next->free) {
+        uint32_t combined = h->size + h->next->size;
+        if (combined >= req_total) {
+            // merge with next
+            h->size = combined;
+            h->next = h->next->next;
+            split_block(h, req_total);
+            return ptr;
+        }
+    }
+
+    // otherwise allocate a new block and copy
+    void *newp = malloc(size);
+    if (!newp) return NULL;
+    // copy the lesser of old payload and new size
+    uint32_t old_payload = h->size - HEADER_SIZE;
+    uint32_t to_copy = (old_payload < req_payload) ? old_payload : req_payload;
+    // use memcpy from your libc (or a small loop if you don't want header include)
+    memcpy(newp, ptr, to_copy);
+    free(ptr);
+    return newp;
+}
+
+void *calloc(size_t nmemb, size_t size) {
+    // check overflow
+    uint64_t total = (uint64_t)nmemb * (uint64_t)size;
+    if (total == 0 || total > (uint64_t)0xFFFFFFFFU) return NULL;
+    void *p = malloc((size_t)total);
+    if (!p) return NULL;
+    // zero memory
+    uint8_t *b = (uint8_t *)p;
+    for (size_t i = 0; i < (size_t)total; ++i) b[i] = 0;
+    return p;
 }
 
 /* ---------------- STRING ---------------- */
@@ -156,4 +333,54 @@ int atoi(const char *str) {
     }
 
     return sign * res;
+}
+
+static int cursor_pos = 0;
+
+static void update_cursor() {
+    uint16_t pos = (uint16_t)cursor_pos;
+
+    outb(0x3D4, 0x0F);          // low cursor byte
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+
+    outb(0x3D4, 0x0E);          // high cursor byte
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+}
+
+void putchar(char c) {
+    if (c == '\n') {
+        cursor_pos += VGA_WIDTH - (cursor_pos % VGA_WIDTH); // move to next line
+        if (cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
+            cursor_pos = 0; // wrap around (or scroll)
+        }
+        update_cursor();
+        return;
+    }
+
+    VGA_ADDR[cursor_pos] = (VGA_COLOR << 8) | c;
+    cursor_pos++;
+    if (cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
+        cursor_pos = 0; // wrap around (or scroll)
+    }
+    update_cursor();
+}
+
+void puts(const char* str) {
+    while (*str) {
+        putchar(*str++);
+    }
+    putchar('\n'); // automatic newline like standard puts
+}
+
+/* LIBsCuffed shows itself up a LOT here */
+
+void printf(const char* s) {
+    while (*s) putchar(*s++);
+}
+
+void clear() {
+    for (int i=0;i<VGA_WIDTH*VGA_HEIGHT;i++) {
+        putchar(' ');
+    }
+    cursor_pos = 0;
 }
