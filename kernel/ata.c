@@ -29,12 +29,15 @@
 
 // Small I/O delay: historically read port 0x80 or alt-status several times.
 // Here we read alternate status a few times for ~400ns-ish delay.
-static inline void io_wait(void) {
-    (void)inb(ATA_ALTSTATUS);
-    (void)inb(ATA_ALTSTATUS);
-    (void)inb(ATA_ALTSTATUS);
-    (void)inb(ATA_ALTSTATUS);
+static int io_wait() {
+    uint32_t i = 0;
+    while (i++ < 30000) {
+        uint8_t status = inb(ATA_ALTSTATUS);
+        if (!(status & ATA_SR_BSY)) return 0; // ready
+    }
+    return -1; // timeout
 }
+
 
 // Poll status until not BSY and optionally until DRQ set. timeout is loop iterations.
 static int ata_poll(uint32_t timeout_loops, int wait_for_drq) {
@@ -57,7 +60,7 @@ static int ata_poll(uint32_t timeout_loops, int wait_for_drq) {
 
 // Write 'count' sectors (count: 1..255; 0 => 256) from 'source' to LBA
 int ATA_WRITE(const void *source, uint32_t lba, uint8_t count) {
-    if (count == 0) count = 0; // caller knows semantics; ATA treats 0 as 256
+    if (count == 0) count = 256; // caller knows semantics; ATA treats 0 as 256
 
     // wait until controller ready
     if (ata_poll(1000000, 0) != ATA_OK) return ATA_ERR_TIMEOUT;
@@ -93,16 +96,16 @@ int ATA_WRITE(const void *source, uint32_t lba, uint8_t count) {
 
 // Read 'count' sectors (count: 1..255; 0 => 256) into 'buffer' from LBA
 int ATA_READ(void *buffer, uint32_t lba, uint8_t count) {
-    if (count == 0) count = 0; // ATA semantics: 0 -> 256
+    if (count == 0) count = 256; // ATA semantics: 0 -> 256
 
     if (ata_poll(1000000, 0) != ATA_OK) return ATA_ERR_TIMEOUT;
 
-    outb(ATA_DRIVE, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(ATA_DRIVE, 0xE0 | ((lba-1 >> 24) & 0x0F));
     io_wait();
     outb(ATA_SECCOUNT, count);
-    outb(ATA_LBA_LOW,  lba & 0xFF);
-    outb(ATA_LBA_MID,  (lba >> 8) & 0xFF);
-    outb(ATA_LBA_HIGH, (lba >> 16) & 0xFF);
+    outb(ATA_LBA_LOW,  lba-1 & 0xFF);
+    outb(ATA_LBA_MID,  (lba-1 >> 8) & 0xFF);
+    outb(ATA_LBA_HIGH, (lba-1 >> 16) & 0xFF);
     io_wait();
 
     outb(ATA_COMMAND, 0x20);  // READ SECTORS

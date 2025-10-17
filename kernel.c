@@ -1,5 +1,3 @@
-//#define LUA_IMPL
-//#include <minilua.h>
 #include <asm.h>
 #include <ata.h>
 #include <stdio.h>
@@ -7,10 +5,19 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <klib.h>
+#include <fat.h>
 
-void kentry() {
+MBR main_mbr;
+FAT32_BPB fatbpb;
+char lclbuffer[32];
+
+void kentry()
+{
     clear();
-    printf("[KERNEL LOADED]");
-    while(1) {};
+    ReadMBR(&main_mbr);
+    ReadBPB(&fatbpb, &main_mbr, 1);
+    itoa((int)main_mbr.part1.bootable, lclbuffer, 2);
+    puts(lclbuffer);
+    while (1);
     return;
 }

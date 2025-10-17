@@ -1,3 +1,5 @@
+/* This file is named libscuffed.c, it is an implementation of libc for UraniteOS */
+
 #include <asm.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -150,92 +152,153 @@ char *strchr(const char *s,int c){while(*s){if(*s==(char)c)return (char*)s;s++;}
 // ----------------------
 // Int <-> string
 // ----------------------
-char *itoa(int val,char *dest,int base){if(base<2||base>16){dest[0]='\0';return dest;}char buf[33];int i=0,isneg=0;if(val==0){dest[0]='0';dest[1]='\0';return dest;}if(val<0&&base==10){isneg=1;val=-val;}while(val){int r=val%base;buf[i++]=(r>9)?r-10+'a':r+'0';val/=base;}if(isneg)buf[i++]='-';for(int j=0;j<i;j++) dest[j]=buf[i-j-1];dest[i]='\0';return dest;}
+char *itoa(int val, char *dest, int base){
+    if(base<2||base>16){dest[0]='\0'; return dest;}
+    char buf[33];
+    int i=0;
+    unsigned int uval;
+
+    if(val==0){dest[0]='0'; dest[1]='\0'; return dest;}
+
+    int isneg = (val<0);
+    uval = isneg > 0 ? -(unsigned int)val : (unsigned int)val;
+
+    while(uval > 1){
+        int r = uval % base;
+        buf[i++] = (r>9) ? r-10+'a' : r+'0';
+        uval /= base;
+    }
+
+    if(isneg) buf[i++]='-';
+    for(int j=0;j<i;j++) dest[j]=buf[i-j-1];
+    dest[i]='\0';
+    return dest;
+}
 int atoi(const char *s){int r=0,sign=1;while(*s==' '||*s=='\t'||*s=='\n') s++;if(*s=='-'){sign=-1;s++;}else if(*s=='+'){s++;}while(*s>='0'&&*s<='9'){r=r*10+(*s-'0');s++;}return sign*r;}
 
 // ----------------------
 // VGA console
 // ----------------------
-static int cursor_pos=0;
-static void update_cursor(){uint16_t pos=(uint16_t)cursor_pos; outb(0x3D4,0x0F); outb(0x3D5,(uint8_t)(pos&0xFF)); outb(0x3D4,0x0E); outb(0x3D5,(uint8_t)((pos>>8)&0xFF));}
-void putchar(char c){if(c=='\n'){cursor_pos+=VGA_WIDTH-(cursor_pos%VGA_WIDTH);if(cursor_pos>=VGA_WIDTH*VGA_HEIGHT) cursor_pos=0;update_cursor();return;}VGA_ADDR[cursor_pos]=(VGA_COLOR<<8)|c;cursor_pos++;if(cursor_pos>=VGA_WIDTH*VGA_HEIGHT) cursor_pos=0;update_cursor();}
-void puts(const char* s){while(*s) putchar(*s++); putchar('\n');}
-void clear(){for(int i=0;i<VGA_WIDTH*VGA_HEIGHT;i++) putchar(' '); cursor_pos=0;}
+static uint16_t cursor_pos = 0;
+static void update_cursor() {
+    uint16_t pos = (uint16_t)cursor_pos;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+}
 
+void clear();
 
-#include <stdarg.h>
-#include <stddef.h>
-#include <stdint.h>
+void putchar(char c) 
+{
+    if (c == '\n') {
+        cursor_pos = (cursor_pos / VGA_WIDTH + 1) * VGA_WIDTH;
+    } else if (c == '\r') {
+        cursor_pos -= cursor_pos % VGA_WIDTH;
+    } else {
+        VGA_ADDR[cursor_pos] = (VGA_COLOR << 8) | c;
+        cursor_pos++;
+    }
 
-// ----------------------------
-// Internal helpers
-// ----------------------------
-static void print_char(char **buf, char c) {
-    if (buf) {
-        **buf = c;
-        (*buf)++;
+    if (cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
+        memcpy(VGA_ADDR, VGA_ADDR + VGA_WIDTH, (VGA_HEIGHT - 1) * VGA_WIDTH * 2);
+        for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_WIDTH * VGA_HEIGHT; i++)
+            VGA_ADDR[i] = (VGA_COLOR << 8) | ' ';
+        cursor_pos -= VGA_WIDTH;
+    }
+
+    update_cursor();
+}
+
+void clear() {
+    cursor_pos = 0;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
+        putchar(' ');
+    cursor_pos = 0;
+    update_cursor();
+}
+
+void puts(const char *s) {
+    while (*s) putchar(*s++);
+    putchar('\n');
+}
+
+// ----------------------
+// printf helpers
+// ----------------------
+static void print_char_dest(char **dest, char c) {
+    if (dest) {
+        **dest = c;
+        (*dest)++;
     } else {
         putchar(c);
     }
 }
 
-static void print_str(char **buf, const char *s) {
-    if(!s) s = "(null)";
-    while(*s) print_char(buf,*s++);
+static void print_str_dest(char **dest, const char *s) {
+    if (!s) s = "(null)";
+    while (*s) print_char_dest(dest, *s++);
 }
 
-static void print_num(char **buf, long num, int base, int is_signed) {
-    char digits[] = "0123456789abcdef";
-    char tmp[32];
+static void print_num_dest(char **dest, long num, int base, int is_signed) {
+    char buf[32];
     int i = 0;
-    unsigned long n;
+    unsigned long n = num;
 
     if (is_signed && num < 0) {
-        print_char(buf, '-');
-        n = (unsigned long)(-num);
-    } else {
-        n = (unsigned long)num;
+        print_char_dest(dest, '-');
+        n = -num;
     }
 
     if (n == 0) {
-        print_char(buf, '0');
+        print_char_dest(dest, '0');
         return;
     }
 
     while (n) {
-        tmp[i++] = digits[n % base];
+        int rem = n % base;
+        buf[i++] = rem < 10 ? '0' + rem : 'a' + rem - 10;
         n /= base;
     }
-    while (i--) print_char(buf, tmp[i]);
+
+    while (i--) print_char_dest(dest, buf[i]);
 }
 
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
     char *ptr = buf;
     char *end = buf ? buf + size : NULL;
 
-    while(*fmt){
-        if(*fmt != '%'){ if(ptr && ptr<end) *ptr++ = *fmt; else if(!ptr) putchar(*fmt); fmt++; continue; }
-        fmt++;
-        if(!*fmt) break;
+    while (*fmt) {
+        if (*fmt != '%') {
+            if (!buf) putchar(*fmt);
+            else if (ptr && ptr < end) *ptr++ = *fmt;
+            fmt++;
+            continue;
+        }
 
-        switch(*fmt){
-            case 'c': { char c = (char)va_arg(args,int); print_char(&ptr,c); break; }
-            case 's': { char *s = va_arg(args,char*); print_str(&ptr,s); break; }
-            case 'd': case 'i': { int n = va_arg(args,int); print_num(&ptr,n,10,1); break; }
-            case 'u': { unsigned int n = va_arg(args,unsigned int); print_num(&ptr,n,10,0); break; }
-            case 'x': case 'X': { unsigned int n = va_arg(args,unsigned int); print_num(&ptr,n,16,0); break; }
-            case '%': print_char(&ptr,'%'); break;
-            default: print_char(&ptr,*fmt);
+        fmt++;
+        if (!*fmt) break;
+
+        switch (*fmt) {
+            case 'c': print_char_dest(&ptr, (char)va_arg(args, int)); break;
+            case 's': print_str_dest(&ptr, va_arg(args, char*)); break;
+            case 'd':
+            case 'i': print_num_dest(&ptr, va_arg(args, int), 10, 1); break;
+            case 'u': print_num_dest(&ptr, va_arg(args, unsigned int), 10, 0); break;
+            case 'x': case 'X': print_num_dest(&ptr, va_arg(args, unsigned int), 16, 0); break;
+            case '%': print_char_dest(&ptr, '%'); break;
+            default: print_char_dest(&ptr, *fmt); break;
         }
         fmt++;
     }
 
-    if(ptr && size>0){
-        if(ptr < end) *ptr = '\0';
-        else buf[size-1]='\0';
+    if (ptr && size > 0) {
+        if (ptr < end) *ptr = '\0';
+        else buf[size - 1] = '\0';
     }
 
-    return ptr ? (int)(ptr-buf) : 0;
+    return ptr ? (int)(ptr - buf) : 0;
 }
 
 // ----------------------
@@ -252,7 +315,7 @@ int printf(const char *fmt, ...) {
 int sprintf(char *buf, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    int r = vsnprintf(buf, 0xFFFFFFF, fmt, args); // big number to avoid overflow
+    int r = vsnprintf(buf, 0xFFFFFFF, fmt, args);
     va_end(args);
     return r;
 }

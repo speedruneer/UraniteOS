@@ -56,10 +56,11 @@ pm_start:
     mov ax, 0x10
     mov ds, ax
     mov es, ax
+    mov cs, ax
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0x7C00    ; setup stack somewhere safe
+    mov esp, 0x7000    ; setup stack somewhere safe
 
     ; Jump to kernel entry
     call kentry

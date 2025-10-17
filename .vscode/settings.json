@@ -10,7 +10,10 @@
         "stdio.h": "c",
         "klib.h": "c",
         "string.h": "c",
-        "stddef.h": "c"
+        "stddef.h": "c",
+        "ata.h": "c",
+        "fat.h": "c",
+        "asm.h": "c"
     },
     "makefile.configureOnOpen": false
 }

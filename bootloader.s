@@ -58,5 +58,20 @@ disk_error:
 
 ERROR_MSG: db "Disk read error!", 0
 
-times 510-($-$$) db 0
+
+times (0x1b4 - ($-$$)) db 0    ; Pad For MBR Partition Table
+
+; THE MBR
+UID: times 10 db 0x00
+MAIN_PART:
+db 0x80 ; bootable?
+db 0, 0, 0 ; useless
+db 0x0C ; FS type, here FAT32
+db 0, 0, 0 ; useless
+dd 16 ; starting LBA
+dd 800 ; sector count
+PT2: times 2 dq 0
+PT3: times 2 dq 0
+PT4: times 2 dq 0
+
 dw 0xAA55
