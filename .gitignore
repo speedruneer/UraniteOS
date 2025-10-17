@@ -1,0 +1,7 @@
+*.o
+.vscode
+*.bin
+*.iso
+*.img
+*.bo
+include/minilua.h

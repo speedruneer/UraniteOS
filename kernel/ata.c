@@ -1,6 +1,6 @@
-// ata_safe.c
+// ata.c
 #include <stdint.h>
-#include "asm.h"
+#include <asm.h>
 
 // ATA ports for primary channel
 #define ATA_DATA       0x1F0

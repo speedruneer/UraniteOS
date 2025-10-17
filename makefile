@@ -16,7 +16,7 @@ LDFLAGS := -m elf_i386 -T linker.ld
 # Sources
 BOOT_SRC   := bootloader.s
 ENTRY_SRC  := entry.s
-KERNEL_SRC := kernel.c $(shell find kernel/ -name '*.c')
+KERNEL_SRC := kernel.c $(shell find kernel -name '*.c')
 
 # Objects
 OBJ_ENTRY  := $(ENTRY_SRC:.s=.o)
@@ -68,6 +68,7 @@ bootable: bootloader $(KERNEL_BIN)
 	cat $(BOOTLOADER_BIN) $(KERNEL_BIN) > $(BOOTABLE_BIN)
 	# Add padding if needed (optional)
 	dd if=/dev/zero bs=512 count=300 >> $(BOOTABLE_BIN) 2>/dev/null
+	@rm *.elf $(OBJ_ALL)
 	@echo "Bootable OS created: $(BOOTABLE_BIN)"
 
 # -----------------------------

@@ -5,7 +5,6 @@ ENTRY(start)        /* entry point in entry.s */
 
 SECTIONS
 {
-    /* start at 1MB (0x100000) for convenience, can change) */
     . = 0x9000;
 
     /* code section for entry + kernel */

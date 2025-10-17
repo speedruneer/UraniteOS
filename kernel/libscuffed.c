@@ -1,386 +1,266 @@
-#include <stdlib.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
 #include <asm.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <time.h>
 
 #define VGA_ADDR ((uint16_t*)0xB8000)
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 #define VGA_COLOR 0x07  // light gray on black
 
-#define HEAP_START 0x100000  // example start of heap (1MB)
-#define HEAP_SIZE  0x100000  // 1MB heap size
+#define HEAP_START 0x100  // 1MB start
+#define HEAP_SIZE  0x1000  // 1MB heap
 
 __attribute__((noreturn))
-void __stack_chk_fail(void) {
-    while(1) {}
-}
+void __stack_chk_fail(void) { while(1); }
 
 __attribute__((noreturn))
-void __stack_chk_fail_local(void) {
-    __stack_chk_fail();
-}
+void __stack_chk_fail_local(void) { __stack_chk_fail(); }
 
+// ----------------------
+// Memory functions
+// ----------------------
 void *memcpy(void *dest, const void *src, size_t n) {
     unsigned char *d = (unsigned char*)dest;
     const unsigned char *s = (const unsigned char*)src;
-    while (n--) {
-        *d++ = *s++;
-    }
+    while (n--) *d++ = *s++;
     return dest;
 }
 
 int memcmp(const void *a, const void *b, size_t n) {
     const unsigned char *pa = (const unsigned char*)a;
     const unsigned char *pb = (const unsigned char*)b;
-    for (size_t i = 0; i < n; ++i) {
-        if (pa[i] != pb[i])
-            return (int)pa[i] - (int)pb[i];
-    }
+    for (size_t i = 0; i < n; ++i) if (pa[i] != pb[i]) return (int)pa[i] - (int)pb[i];
     return 0;
 }
 
-// malloc.c - simple first-fit allocator for IA32 within fixed heap region
-// Replace your bump-allocator section with this file's contents.
-// Expects HEAP_START and HEAP_SIZE macros to be defined (as in your snippet).
-
-#ifndef HEAP_START
-#error "HEAP_START must be defined"
-#endif
-#ifndef HEAP_SIZE
-#error "HEAP_SIZE must be defined"
-#endif
-
-// basic alignment for IA32·
+// ----------------------
+// Simple kernel allocator
+// ----------------------
 #define ALIGN4(x) (((x) + 3) & ~3U)
-
 typedef struct header {
-    uint32_t size;          // total size of this block including header (bytes)
-    struct header *next;    // pointer to next physical block or NULL
-    uint8_t free;           // 1 if free, 0 if allocated
-    uint8_t pad[3];         // padding to make header 12 bytes (multiple of 4)
+    uint32_t size;          // block size including header
+    struct header *next;
+    uint8_t free;
+    uint8_t pad[3];
 } header_t;
-
 #define HEADER_SIZE (sizeof(header_t))
 
-// heap region (provided by user)
-static uint8_t * const _heap_start = (uint8_t *) (uintptr_t) HEAP_START;
-static const uint32_t _heap_size = (uint32_t) HEAP_SIZE;
-static uint8_t _heap_inited = 0;
+static uint8_t * const _heap_start = (uint8_t *)HEAP_START;
+static const uint32_t _heap_size = HEAP_SIZE;
 static header_t *heap_head = NULL;
 
-// internal helpers
-
 static void heap_init(void) {
-    if (_heap_inited) return;
-    // place one big free block covering the whole region
+    if (heap_head) return;
     heap_head = (header_t *)_heap_start;
     heap_head->size = _heap_size;
     heap_head->next = NULL;
     heap_head->free = 1;
-    _heap_inited = 1;
 }
 
-// find a free block (first-fit)
-static header_t *find_free_block(uint32_t total_size, header_t **prev_out) {
+static void split_block(header_t *b, uint32_t total_size) {
+    if (b->size < total_size + HEADER_SIZE + 4) return;
+    header_t *newb = (header_t *)((uint8_t *)b + total_size);
+    newb->size = b->size - total_size;
+    newb->next = b->next;
+    newb->free = 1;
+    b->size = total_size;
+    b->next = newb;
+}
+
+static void try_coalesce_next(header_t *b) {
+    if (!b || !b->next) return;
+    if (b->next->free) {
+        b->size += b->next->size;
+        b->next = b->next->next;
+    }
+}
+
+static header_t *find_free_block(uint32_t total_size) {
     header_t *cur = heap_head;
-    header_t *prev = NULL;
     while (cur) {
-        if (cur->free && cur->size >= total_size) {
-            if (prev_out) *prev_out = prev;
-            return cur;
-        }
-        prev = cur;
+        if (cur->free && cur->size >= total_size) return cur;
         cur = cur->next;
     }
-    if (prev_out) *prev_out = prev;
     return NULL;
 }
 
-// split block into allocated part (size = total_size) and remainder (if enough space)
-static void split_block(header_t *block, uint32_t total_size) {
-    // only split if remaining space is large enough for a header + 4 bytes payload
-    if (block->size >= total_size + HEADER_SIZE + 4) {
-        uint8_t *new_block_addr = (uint8_t *)block + total_size;
-        header_t *new_block = (header_t *) new_block_addr;
-        new_block->size = block->size - total_size;
-        new_block->next = block->next;
-        new_block->free = 1;
-        // shrink current block
-        block->size = total_size;
-        block->next = new_block;
-    }
-}
-
-// coalesce block with next if next is free
-static void try_coalesce_next(header_t *block) {
-    if (!block || !block->next) return;
-    if (block->next->free) {
-        block->size += block->next->size;
-        block->next = block->next->next;
-    }
-}
-
-// get pointer to payload (user pointer)
-static void *header_to_payload(header_t *h) {
-    return (void *)((uint8_t *)h + HEADER_SIZE);
-}
-
-// get header from payload pointer
-static header_t *payload_to_header(void *p) {
-    if (!p) return NULL;
-    return (header_t *)((uint8_t *)p - HEADER_SIZE);
-}
-
-// PUBLIC API
+static void *header_to_payload(header_t *h) { return (void *)((uint8_t *)h + HEADER_SIZE); }
+static header_t *payload_to_header(void *p) { if(!p) return NULL; return (header_t *)((uint8_t *)p - HEADER_SIZE); }
 
 void *malloc(size_t size) {
-    if (size == 0) return NULL;
+    if (!size) return NULL;
     heap_init();
-
-    uint32_t req_payload = (uint32_t) ALIGN4(size);
-    uint32_t total_size = req_payload + (uint32_t)HEADER_SIZE;
-
-    header_t *prev = NULL;
-    header_t *blk = find_free_block(total_size, &prev);
-    if (!blk) {
-        // out of memory within fixed heap
-        return NULL;
-    }
-
-    // If perfect fit or small leftover, just use block
-    split_block(blk, total_size);
+    uint32_t req = ALIGN4(size);
+    uint32_t total = req + HEADER_SIZE;
+    header_t *blk = find_free_block(total);
+    if (!blk) return NULL;
+    split_block(blk, total);
     blk->free = 0;
-
     return header_to_payload(blk);
 }
 
 void free(void *ptr) {
     if (!ptr) return;
     header_t *h = payload_to_header(ptr);
-
-    // basic sanity: ensure header lies within heap range
     uint8_t *hb = (uint8_t *)h;
-    if (hb < _heap_start || hb >= _heap_start + _heap_size) {
-        // invalid pointer for this allocator; ignore quietly
-        return;
-    }
-
+    if (hb < _heap_start || hb >= _heap_start + _heap_size) return;
     h->free = 1;
-
-    // coalesce with next if possible
     try_coalesce_next(h);
-
-    // coalesce with previous by scanning from head (cheap but fine for small heaps)
     header_t *cur = heap_head;
     while (cur && cur->next && cur->next != h) cur = cur->next;
-    if (cur && cur->next == h) {
-        if (cur->free) {
-            cur->size += h->size;
-            cur->next = h->next;
-            h = cur; // now coalesced region; try also to coalesce with following one
-        }
-    }
-
-    // also try to coalesce with next of resulting block
-    try_coalesce_next(h);
+    if (cur && cur->next == h && cur->free) { cur->size += h->size; cur->next = h->next; try_coalesce_next(cur); }
 }
 
 void *realloc(void *ptr, size_t size) {
     if (!ptr) return malloc(size);
-    if (size == 0) { free(ptr); return NULL; }
-
+    if (size==0) { free(ptr); return NULL; }
     header_t *h = payload_to_header(ptr);
-    uint32_t req_payload = (uint32_t) ALIGN4(size);
-    uint32_t req_total = req_payload + (uint32_t)HEADER_SIZE;
-
-    // if current block big enough, maybe split
-    if (h->size >= req_total) {
-        split_block(h, req_total);
-        return ptr;
-    }
-
-    // try to expand into next free block
-    if (h->next && h->next->free) {
-        uint32_t combined = h->size + h->next->size;
-        if (combined >= req_total) {
-            // merge with next
-            h->size = combined;
-            h->next = h->next->next;
-            split_block(h, req_total);
-            return ptr;
-        }
-    }
-
-    // otherwise allocate a new block and copy
-    void *newp = malloc(size);
-    if (!newp) return NULL;
-    // copy the lesser of old payload and new size
-    uint32_t old_payload = h->size - HEADER_SIZE;
-    uint32_t to_copy = (old_payload < req_payload) ? old_payload : req_payload;
-    // use memcpy from your libc (or a small loop if you don't want header include)
-    memcpy(newp, ptr, to_copy);
-    free(ptr);
-    return newp;
+    uint32_t req = ALIGN4(size), total=req+HEADER_SIZE;
+    if (h->size >= total) { split_block(h,total); return ptr; }
+    if (h->next && h->next->free && h->size+h->next->size>=total) { h->size+=h->next->size; h->next=h->next->next; split_block(h,total); return ptr; }
+    void *newp=malloc(size);
+    if(!newp) return NULL;
+    uint32_t copy_size=(h->size-HEADER_SIZE<req)?h->size-HEADER_SIZE:req;
+    uint8_t *src=(uint8_t*)ptr,*dst=(uint8_t*)newp; for(uint32_t i=0;i<copy_size;i++) dst[i]=src[i];
+    free(ptr); return newp;
 }
 
 void *calloc(size_t nmemb, size_t size) {
-    // check overflow
-    uint64_t total = (uint64_t)nmemb * (uint64_t)size;
-    if (total == 0 || total > (uint64_t)0xFFFFFFFFU) return NULL;
-    void *p = malloc((size_t)total);
-    if (!p) return NULL;
-    // zero memory
-    uint8_t *b = (uint8_t *)p;
-    for (size_t i = 0; i < (size_t)total; ++i) b[i] = 0;
+    uint64_t total = (uint64_t)nmemb*size;
+    if(!total || total>0xFFFFFFFF) return NULL;
+    void *p=malloc((size_t)total); if(!p) return NULL;
+    uint8_t *b=(uint8_t*)p; for(size_t i=0;i<(size_t)total;i++) b[i]=0;
     return p;
 }
 
-/* ---------------- STRING ---------------- */
+// ----------------------
+// Strings
+// ----------------------
+size_t strlen(const char *str) { size_t len=0; while(str[len]) len++; return len; }
+int strcmp(const char *a,const char *b){while(*a&&(*a==*b)){a++;b++;}return (unsigned char)*a-(unsigned char)*b;}
+char *strcpy(char *d,const char *s){char *r=d;while((*d++=*s++));return r;}
+char *strncpy(char *d,const char *s,size_t n){size_t i;for(i=0;i<n&&s[i];i++)d[i]=s[i];for(;i<n;i++)d[i]='\0';return d;}
+char *strdup(const char *s){size_t len=strlen(s);char *c=malloc(len+1);if(!c)return NULL;for(size_t i=0;i<=len;i++)c[i]=s[i];return c;}
+char *strchr(const char *s,int c){while(*s){if(*s==(char)c)return (char*)s;s++;}if(c==0)return (char*)s;return NULL;}
 
-// Return length of a null-terminated string
-size_t strlen(const char *str) {
-    size_t len = 0;
-    while (str[len] != 0) {len++;}
-    return len;
-}
+// ----------------------
+// Int <-> string
+// ----------------------
+char *itoa(int val,char *dest,int base){if(base<2||base>16){dest[0]='\0';return dest;}char buf[33];int i=0,isneg=0;if(val==0){dest[0]='0';dest[1]='\0';return dest;}if(val<0&&base==10){isneg=1;val=-val;}while(val){int r=val%base;buf[i++]=(r>9)?r-10+'a':r+'0';val/=base;}if(isneg)buf[i++]='-';for(int j=0;j<i;j++) dest[j]=buf[i-j-1];dest[i]='\0';return dest;}
+int atoi(const char *s){int r=0,sign=1;while(*s==' '||*s=='\t'||*s=='\n') s++;if(*s=='-'){sign=-1;s++;}else if(*s=='+'){s++;}while(*s>='0'&&*s<='9'){r=r*10+(*s-'0');s++;}return sign*r;}
 
-// Compare two strings. Returns 0 if equal, <0 if a<b, >0 if a>b
-int strcmp(const char *a, const char *b) {
-    while (*a && (*a == *b)) {
-        a++;
-        b++;
+// ----------------------
+// VGA console
+// ----------------------
+static int cursor_pos=0;
+static void update_cursor(){uint16_t pos=(uint16_t)cursor_pos; outb(0x3D4,0x0F); outb(0x3D5,(uint8_t)(pos&0xFF)); outb(0x3D4,0x0E); outb(0x3D5,(uint8_t)((pos>>8)&0xFF));}
+void putchar(char c){if(c=='\n'){cursor_pos+=VGA_WIDTH-(cursor_pos%VGA_WIDTH);if(cursor_pos>=VGA_WIDTH*VGA_HEIGHT) cursor_pos=0;update_cursor();return;}VGA_ADDR[cursor_pos]=(VGA_COLOR<<8)|c;cursor_pos++;if(cursor_pos>=VGA_WIDTH*VGA_HEIGHT) cursor_pos=0;update_cursor();}
+void puts(const char* s){while(*s) putchar(*s++); putchar('\n');}
+void clear(){for(int i=0;i<VGA_WIDTH*VGA_HEIGHT;i++) putchar(' '); cursor_pos=0;}
+
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+
+// ----------------------------
+// Internal helpers
+// ----------------------------
+static void print_char(char **buf, char c) {
+    if (buf) {
+        **buf = c;
+        (*buf)++;
+    } else {
+        putchar(c);
     }
-    return (unsigned char)*a - (unsigned char)*b;
 }
 
-// Copy string src to dest. Assumes dest is large enough
-char *strcpy(char *dest, const char *src) {
-    char *d = dest;
-    while ((*d++ = *src++));
-    return dest;
+static void print_str(char **buf, const char *s) {
+    if(!s) s = "(null)";
+    while(*s) print_char(buf,*s++);
 }
 
-// Copy at most n characters from src to dest. Pads with '\0' if needed
-char *strncpy(char *dest, const char *src, size_t n) {
-    size_t i;
-    for (i = 0; i < n && src[i]; i++)
-        dest[i] = src[i];
-    for (; i < n; i++)
-        dest[i] = '\0';
-    return dest;
-}
-
-/* ---------------- INTEGER STRING CONVERSIONS ---------------- */
-
-// Convert integer to string (base 10), returns dest
-char *itoa(int value, char *dest, int base) {
-    if (base < 2 || base > 16) {
-        dest[0] = '\0';
-        return dest;
-    }
-
-    char buf[33]; // Enough for 32-bit int + sign
+static void print_num(char **buf, long num, int base, int is_signed) {
+    char digits[] = "0123456789abcdef";
+    char tmp[32];
     int i = 0;
-    int is_negative = 0;
+    unsigned long n;
 
-    if (value == 0) {
-        dest[0] = '0';
-        dest[1] = '\0';
-        return dest;
+    if (is_signed && num < 0) {
+        print_char(buf, '-');
+        n = (unsigned long)(-num);
+    } else {
+        n = (unsigned long)num;
     }
 
-    if (value < 0 && base == 10) {
-        is_negative = 1;
-        value = -value;
-    }
-
-    while (value != 0) {
-        int rem = value % base;
-        buf[i++] = (rem > 9) ? (rem - 10) + 'a' : rem + '0';
-        value /= base;
-    }
-
-    if (is_negative) buf[i++] = '-';
-
-    // Reverse into dest
-    int j;
-    for (j = 0; j < i; j++)
-        dest[j] = buf[i - j - 1];
-    dest[i] = '\0';
-    return dest;
-}
-
-// Convert string to integer (base 10)
-int atoi(const char *str) {
-    int res = 0;
-    int sign = 1;
-
-    // Skip whitespace
-    while (*str == ' ' || *str == '\t' || *str == '\n') str++;
-
-    if (*str == '-') {
-        sign = -1;
-        str++;
-    } else if (*str == '+') {
-        str++;
-    }
-
-    while (*str >= '0' && *str <= '9') {
-        res = res * 10 + (*str - '0');
-        str++;
-    }
-
-    return sign * res;
-}
-
-static int cursor_pos = 0;
-
-static void update_cursor() {
-    uint16_t pos = (uint16_t)cursor_pos;
-
-    outb(0x3D4, 0x0F);          // low cursor byte
-    outb(0x3D5, (uint8_t)(pos & 0xFF));
-
-    outb(0x3D4, 0x0E);          // high cursor byte
-    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
-}
-
-void putchar(char c) {
-    if (c == '\n') {
-        cursor_pos += VGA_WIDTH - (cursor_pos % VGA_WIDTH); // move to next line
-        if (cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
-            cursor_pos = 0; // wrap around (or scroll)
-        }
-        update_cursor();
+    if (n == 0) {
+        print_char(buf, '0');
         return;
     }
 
-    VGA_ADDR[cursor_pos] = (VGA_COLOR << 8) | c;
-    cursor_pos++;
-    if (cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
-        cursor_pos = 0; // wrap around (or scroll)
+    while (n) {
+        tmp[i++] = digits[n % base];
+        n /= base;
     }
-    update_cursor();
+    while (i--) print_char(buf, tmp[i]);
 }
 
-void puts(const char* str) {
-    while (*str) {
-        putchar(*str++);
+int vsnprintf(char *buf, size_t size, const char *fmt, va_list args) {
+    char *ptr = buf;
+    char *end = buf ? buf + size : NULL;
+
+    while(*fmt){
+        if(*fmt != '%'){ if(ptr && ptr<end) *ptr++ = *fmt; else if(!ptr) putchar(*fmt); fmt++; continue; }
+        fmt++;
+        if(!*fmt) break;
+
+        switch(*fmt){
+            case 'c': { char c = (char)va_arg(args,int); print_char(&ptr,c); break; }
+            case 's': { char *s = va_arg(args,char*); print_str(&ptr,s); break; }
+            case 'd': case 'i': { int n = va_arg(args,int); print_num(&ptr,n,10,1); break; }
+            case 'u': { unsigned int n = va_arg(args,unsigned int); print_num(&ptr,n,10,0); break; }
+            case 'x': case 'X': { unsigned int n = va_arg(args,unsigned int); print_num(&ptr,n,16,0); break; }
+            case '%': print_char(&ptr,'%'); break;
+            default: print_char(&ptr,*fmt);
+        }
+        fmt++;
     }
-    putchar('\n'); // automatic newline like standard puts
+
+    if(ptr && size>0){
+        if(ptr < end) *ptr = '\0';
+        else buf[size-1]='\0';
+    }
+
+    return ptr ? (int)(ptr-buf) : 0;
 }
 
-/* LIBsCuffed shows itself up a LOT here */
-
-void printf(const char* s) {
-    while (*s) putchar(*s++);
+// ----------------------
+// printf wrappers
+// ----------------------
+int printf(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int r = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    return r;
 }
 
-void clear() {
-    for (int i=0;i<VGA_WIDTH*VGA_HEIGHT;i++) {
-        putchar(' ');
-    }
-    cursor_pos = 0;
+int sprintf(char *buf, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int r = vsnprintf(buf, 0xFFFFFFF, fmt, args); // big number to avoid overflow
+    va_end(args);
+    return r;
+}
+
+int snprintf(char *buf, size_t size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    int r = vsnprintf(buf, size, fmt, args);
+    va_end(args);
+    return r;
 }

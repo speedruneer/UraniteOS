@@ -7,7 +7,10 @@
         "*.usm": "nasm",
         "*.bo": "json",
         "stdint.h": "c",
-        "stdio.h": "c"
+        "stdio.h": "c",
+        "klib.h": "c",
+        "string.h": "c",
+        "stddef.h": "c"
     },
     "makefile.configureOnOpen": false
 }
